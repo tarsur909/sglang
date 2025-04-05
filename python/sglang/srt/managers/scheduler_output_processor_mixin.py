@@ -77,6 +77,8 @@ class SchedulerOutputProcessorMixin:
                     req.check_finished()
 
                     if req.finished():
+                        if req.origin_input_text in self.is_running:
+                            self.is_running.pop(req.origin_input_text, None)
                         self.tree_cache.cache_finished_req(req)
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
                         # This updates radix so others can match
@@ -165,6 +167,8 @@ class SchedulerOutputProcessorMixin:
                     req.check_finished()
 
                     if req.finished():
+                        if req.origin_input_text in self.is_running:
+                            self.is_running.pop(req.origin_input_text, None)
                         self.tree_cache.cache_finished_req(req)
                     else:
                         self.tree_cache.cache_unfinished_req(req)
@@ -224,6 +228,8 @@ class SchedulerOutputProcessorMixin:
 
             req.check_finished()
             if req.finished():
+                if req.origin_input_text in self.is_running:
+                    self.is_running.pop(req.origin_input_text, None)
                 self.tree_cache.cache_finished_req(req)
 
             if req.return_logprob and batch.spec_algorithm.is_none():
@@ -517,7 +523,7 @@ class SchedulerOutputProcessorMixin:
                 decode_ids, read_offset = req.init_incremental_detokenize()
                 decode_ids_list.append(decode_ids)
                 read_offsets.append(read_offset)
-                if self.skip_tokenizer_init:
+                if True or self.skip_tokenizer_init:
                     output_ids.append(req.output_ids)
                 skip_special_tokens.append(req.sampling_params.skip_special_tokens)
                 spaces_between_special_tokens.append(

@@ -1036,6 +1036,7 @@ class ModelRunner:
             forward_batch.return_logprob,
             forward_batch.top_logprobs_nums,
             forward_batch.token_ids_logprobs,
+            forward_batch.diversify_batch_info
         )
         return next_token_ids
 

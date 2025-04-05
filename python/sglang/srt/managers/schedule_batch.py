@@ -54,6 +54,7 @@ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import flatten_nested_list, get_compiler_backend
+from sglang.srt.managers.diversify_utils import insert_forbidden_sequence
 
 if TYPE_CHECKING:
     from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
@@ -480,6 +481,12 @@ class Req:
         # This is used to compute the average acceptance length per request.
         self.spec_verify_ct = 0
         self.lora_path = lora_path
+        
+        self.root = None
+        self.node = None
+        self.log_probs_lst = []
+
+        self.finished_flag = False
 
         # For disaggregation
         self.bootstrap_host: str = "0.0.0.0"
@@ -511,7 +518,12 @@ class Req:
 
     def finished(self) -> bool:
         # Whether request reached finished condition
-        return self.finished_reason is not None
+        fin = self.finished_reason is not None
+        if fin and not self.finished_flag and self.root is not None:
+            self.finished_flag = True
+            insert_forbidden_sequence(self.root, self.output_ids, self.log_probs_lst)
+            assert len(self.root.children) > 0
+        return fin
 
     def init_next_round_input(
         self,
@@ -632,7 +644,10 @@ class Req:
 
 
 bid = 0
-
+class DiversifyBatchInfo:
+    def __init__(self, reqs: List[Req]):
+        self.reqs = reqs
+        self.eos_token_id = reqs[0].tokenizer.eos_token_id
 
 @dataclasses.dataclass
 class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
@@ -1451,6 +1466,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         global bid
         bid += 1
+        diversify_batch_info = DiversifyBatchInfo(self.reqs)
         return ModelWorkerBatch(
             bid=bid,
             forward_mode=self.forward_mode,
@@ -1492,6 +1508,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 )
             ),
             extend_input_logprob_token_ids=self.extend_input_logprob_token_ids,
+            diversify_batch_info=diversify_batch_info,
         )
 
     def copy(self):
@@ -1573,6 +1590,9 @@ class ModelWorkerBatch:
     spec_info: Optional[Union[EagleVerifyInput, EagleDraftInput]] = None
     # If set, the output of the batch contains the hidden states of the run.
     capture_hidden_mode: CaptureHiddenMode = None
+
+    # Diversify
+    diversify_batch_info: Optional[DiversifyBatchInfo] = None
 
 
 @triton.jit

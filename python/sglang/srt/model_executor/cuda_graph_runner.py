@@ -415,6 +415,7 @@ class CudaGraphRunner:
             spec_algorithm=self.model_runner.spec_algorithm,
             spec_info=spec_info,
             capture_hidden_mode=self.capture_hidden_mode,
+            diversify_batch_info=None
         )
 
         # Attention backend

@@ -147,6 +147,9 @@ class ForwardBatch:
 
     # The sum of all sequence lengths
     seq_lens_sum: int
+    
+    # Diversify batch info
+    diversify_batch_info: Optional[Any]
 
     # Optional seq_lens on cpu
     seq_lens_cpu: Optional[torch.Tensor] = None
@@ -262,6 +265,7 @@ class ForwardBatch:
             capture_hidden_mode=batch.capture_hidden_mode,
             input_embeds=batch.input_embeds,
             extend_input_logprob_token_ids_gpu=extend_input_logprob_token_ids_gpu,
+            diversify_batch_info=batch.diversify_batch_info
         )
 
         # For DP attention

@@ -11,6 +11,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.utils import crash_on_warnings, get_bool_env_var, is_cuda_available
+from sglang.srt.managers.diversify_utils import adjust_next_token_log_probs
 
 if is_cuda_available():
     from sgl_kernel import (
@@ -42,6 +43,7 @@ class Sampler(nn.Module):
         return_logprob: bool,
         top_logprobs_nums: List[int],
         token_ids_logprobs: List[List[int]],
+        diversify_batch_info
     ):
         """Run a sampler & compute logprobs and update logits_output accordingly.
 
@@ -69,18 +71,55 @@ class Sampler(nn.Module):
             if crash_on_warnings():
                 raise ValueError("Detected errors during sampling! NaN in the logits.")
 
-        if sampling_info.is_all_greedy:
-            # Use torch.argmax if all requests use greedy sampling
-            batch_next_token_ids = torch.argmax(logits, -1)
-            if return_logprob:
-                logprobs = torch.nn.functional.log_softmax(logits, dim=-1)
+        batch_size = logits.shape[0]
+        log_probs = torch.nn.functional.log_softmax(logits, dim = -1)
+        
+        if diversify_batch_info is not None:
+            batch_next_token_ids = torch.full((logits.shape[0],), diversify_batch_info.eos_token_id, dtype=torch.long, device=logits.device)
         else:
             # Post process logits
-            logits.div_(sampling_info.temperatures)
-            logits[:] = torch.softmax(logits, dim=-1)
-            probs = logits
-            del logits
+            batch_next_token_ids = torch.empty((logits.shape[0],), dtype=torch.long, device=logits.device)
+        
+        del logits
+        
+        if return_logprob: 
+            logprobs = log_probs.clone()
+            
+        for batch_idx in range(batch_size):
+            if diversify_batch_info is not None and diversify_batch_info.reqs[batch_idx].node is not None:
+                adjust_next_token_log_probs(diversify_batch_info.reqs[batch_idx].node, log_probs[batch_idx])
+            
+            if torch.logsumexp(log_probs[batch_idx], dim=0) == float('-inf'):
+                if diversify_batch_info is not None:
+                    diversify_batch_info.reqs[batch_idx].log_probs_lst.append(float('-inf')) 
 
+                continue
+            
+            # Select the next token based on the specified method
+            if sampling_info.is_all_greedy or sampling_info.temperatures[batch_idx] <= 0.0:
+                # Use torch.argmax if all requests use greedy sampling
+                sampled_next_tok = torch.argmax(log_probs[batch_idx], -1)
+            
+            else:
+                logits_to_sample = log_probs[batch_idx] / sampling_info.temperatures[batch_idx]
+                categorical = torch.distributions.Categorical(logits=logits_to_sample)
+                sampled_next_tok = categorical.sample()
+            
+            batch_next_token_ids[batch_idx] = sampled_next_tok
+            if diversify_batch_info is not None:
+                diversify_batch_info.reqs[batch_idx].log_probs_lst.append(log_probs[batch_idx][sampled_next_tok].item())
+            
+            if diversify_batch_info is not None and diversify_batch_info.reqs[batch_idx].node is not None:
+                if sampled_next_tok.item() in diversify_batch_info.reqs[batch_idx].node.children:
+                    diversify_batch_info.reqs[batch_idx].node = diversify_batch_info.reqs[batch_idx].node.children[sampled_next_tok.item()]
+                else:
+                    diversify_batch_info.reqs[batch_idx].node = None
+            
+            
+            if return_logprob:
+                logprobs[batch_idx][sampled_next_tok] = log_probs[batch_idx][sampled_next_tok]
+        
+        if not sampling_info.is_all_greedy:
             if global_server_args_dict["sampling_backend"] == "flashinfer":
                 if return_logprob:
                     # NOTE: the top_p_renorm_prob from flashinfer has numerical problems,
@@ -92,39 +131,7 @@ class Sampler(nn.Module):
                         top_p_normalize_probs_torch(probs, sampling_info.top_ps)
                     ).clamp(min=torch.finfo(probs.dtype).min)
 
-                max_top_k_round, batch_size = 32, probs.shape[0]
-                uniform_samples = torch.rand(
-                    (max_top_k_round, batch_size), device=probs.device
-                )
-                if sampling_info.need_min_p_sampling:
-                    probs = top_k_renorm_prob(probs, sampling_info.top_ks)
-                    probs = top_p_renorm_prob(probs, sampling_info.top_ps)
-                    batch_next_token_ids = min_p_sampling_from_probs(
-                        probs, uniform_samples, sampling_info.min_ps
-                    )
-                else:
-                    batch_next_token_ids, success = top_k_top_p_sampling_from_probs(
-                        probs,
-                        uniform_samples,
-                        sampling_info.top_ks,
-                        sampling_info.top_ps,
-                        filter_apply_order="joint",
-                    )
-
-                    if self.use_nan_detection and not torch.all(success):
-                        logger.warning("Detected errors during sampling!")
-                        batch_next_token_ids = torch.zeros_like(batch_next_token_ids)
-
             elif global_server_args_dict["sampling_backend"] == "pytorch":
-                # A slower fallback implementation with torch native operations.
-                batch_next_token_ids = top_k_top_p_min_p_sampling_from_probs_torch(
-                    probs,
-                    sampling_info.top_ks,
-                    sampling_info.top_ps,
-                    sampling_info.min_ps,
-                    sampling_info.need_min_p_sampling,
-                )
-
                 if return_logprob:
                     # clamp to avoid -inf
                     logprobs = torch.log(

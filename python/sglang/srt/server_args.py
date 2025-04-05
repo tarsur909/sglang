@@ -192,6 +192,8 @@ class ServerArgs:
     # For PD disaggregation: can be "null" (not disaggregated), "prefill" (prefill-only), or "decode" (decode-only)
     disaggregation_mode: str = "null"
     disaggregation_bootstrap_port: int = 8998
+    
+    use_diversify: bool = False
 
     def __post_init__(self):
         # Expert parallelism

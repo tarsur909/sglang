@@ -116,6 +116,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardMode
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
+from sglang.srt.managers.diversify_utils import TrieNode, insert_forbidden_sequence, adjust_next_token_log_probs
 from sglang.srt.utils import (
     DynamicGradMode,
     broadcast_pyobj,
@@ -187,6 +188,9 @@ class Scheduler(
         self.gpu_id = gpu_id
         self.enable_hierarchical_cache = server_args.enable_hierarchical_cache
         self.page_size = server_args.page_size
+        
+        self.roots = {} if server_args.use_diversify else None
+        self.is_running = {}
 
         # Distributed rank info
         self.dp_size = server_args.dp_size
@@ -1189,6 +1193,7 @@ class Scheduler(
         if self.server_args.enable_dp_attention or self.server_args.enable_sp_layernorm:
             ret, _ = self.prepare_dp_attn_batch(ret)
 
+        assert len([req.origin_input_text for req in ret.reqs]) == len(set([req.origin_input_text for req in ret.reqs])) if ret else True, 'duplicate prompts in the batch'
         return ret
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
@@ -1225,6 +1230,8 @@ class Scheduler(
             self.chunked_prefill_size,
             running_bs if self.is_mixed_chunk else 0,
         )
+        
+        unique_prompts = set([req.origin_input_text for req in self.running_batch.reqs] if self.running_batch else [])
 
         if self.chunked_req is not None:
             self.chunked_req.init_next_round_input()
@@ -1250,12 +1257,15 @@ class Scheduler(
             if running_bs + len(adder.can_run_list) >= self.max_running_requests:
                 self.running_batch.batch_is_full = True
                 break
+            
+            if req.origin_input_text in unique_prompts:
+                continue
 
             req.init_next_round_input(
                 None if prefix_computed else self.tree_cache,
                 self.enable_hierarchical_cache,
             )
-
+            unique_prompts.add(req.origin_input_text)
             res = adder.add_one_req(
                 req, self.chunked_req, self.enable_hierarchical_cache
             )
@@ -1325,6 +1335,20 @@ class Scheduler(
             )
         else:
             new_batch.decoding_reqs = None
+
+        for req in new_batch.reqs:
+            if self.roots is not None:
+                if req.origin_input_text in self.roots:
+                    req.root = self.roots[req.origin_input_text]
+                else:
+                    req.root = TrieNode()
+                    self.roots[req.origin_input_text] = req.root
+                req.node = req.root 
+            
+            if req.origin_input_text in self.is_running:
+                assert self.is_running[req.origin_input_text] == req.rid
+            else:
+                self.is_running[req.origin_input_text] = req.rid
 
         return new_batch
 

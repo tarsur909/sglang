@@ -953,6 +953,7 @@ class TokenizerManager:
                 out_dict = {
                     "text": recv_obj.output_strs[i],
                     "meta_info": meta_info,
+                    "output_ids": recv_obj.output_ids[i],
                 }
             elif isinstance(recv_obj, BatchTokenIDOut):
                 if self.server_args.stream_output and state.obj.stream:
